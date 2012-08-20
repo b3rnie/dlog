@@ -1,0 +1,20 @@
+%%-*- mode: erlang -*-
+{application, paxos,
+ [ {description,  "paxos"}
+ , {vsn,          git}
+ , {modules,      []}
+ , {registered,   []}
+ , {mod,          {paxos_app, []}}
+ , {env,          [ {store, paxos_store}
+                  , {id     1} %% 1 - 5
+                  , {nodes, ['paxos1@isaba',
+                             'paxos2@isaba',
+                             'paxos3@isaba',
+                             'paxox4@isaba',
+                             'paxos5@isaba']}
+                  , {cbmod, dummy_callback} %% called for each submitted
+                  , {logdir, "logs/"}
+                  ]}
+ , {applications, [kernel,stdlib]}
+ ]
+}.
