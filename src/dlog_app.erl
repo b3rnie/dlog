@@ -5,8 +5,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%_* Module declaration ===============================================
-%% @private
--module(paxos_app).
+-module(dlog_app).
 -behaviour(application).
 
 %%%_* Exports ==========================================================
@@ -14,7 +13,7 @@
 
 %%%_* Code =============================================================
 start(_Type, Args) ->
-  paxos_sup:start_link(Args).
+  dlog_sup:start_link(Args).
 
 stop(_State) ->
   ok.

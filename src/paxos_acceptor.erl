@@ -20,7 +20,7 @@
         ]).
 
 %%%_* Includes =========================================================
--include_lib("paxos/include/paxos.hrl").
+-include_lib("dlog/include/dlog.hrl").
 
 %%%_* Macros ===========================================================
 %%%_* Code =============================================================
@@ -28,6 +28,7 @@
 -record(s, { max_nodes
            , nodes
            , n
+           , id
            }).
 
 %%%_ * API -------------------------------------------------------------
@@ -50,7 +51,7 @@ handle_call(sync, _From, S) ->
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
-handle_info({prepare, Slot, N}, #s{} = S) ->
+handle_info({Node, {prepare, Slot, N}}, #s{} = S) ->
   case paxos_store:get_n(Slot) of
     SN when N > SN ->
       {LN, LV} = paxos_store:get_accepted(Slot),
@@ -62,7 +63,7 @@ handle_info({prepare, Slot, N}, #s{} = S) ->
       {noreply, S}
   end;
 
-handle_info({propose, Slot, N, V}, #s{nodes=Nodes} = S) ->
+handle_info({Node, {propose, Slot, N, V}}, #s{nodes=Nodes} = S) ->
   case paxos_store:get_n(Slot) of
     N ->
       paxos_store:set_accepted(Slot, N, V),

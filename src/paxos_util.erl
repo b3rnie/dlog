@@ -9,7 +9,7 @@
 %% api
 -export([ send/2
         , broadcast/2
-        , quorom/1
+        , quorum/1
         ]).
 
 %%%_* Macros ===========================================================
@@ -32,7 +32,7 @@ quorum(N)
 -include_lib("eunit/include/eunit.hrl").
 
 quorum_test() ->
-  1 = quorom(1),
+  1 = quorum(1),
   2 = quorum(2),
   2 = quorum(3),
   3 = quorum(4),

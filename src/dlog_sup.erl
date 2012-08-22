@@ -5,8 +5,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%_* Module declaration ===============================================
-%% @private
--module(paxos_sup).
+-module(dlog_sup).
 -behaviour(supervisor).
 
 %%%_* Exports ==========================================================
@@ -18,11 +17,11 @@ start_link(Args) ->
 
 init(_Args) ->
   %%RestartStrategy = {one_for_one, 4, 10},
-  RestartStrategy = {one_for_all, 0, 1}
+  RestartStrategy = {one_for_all, 0, 1},
 
-  Kids = [ {paxos_store,
-            {paxos_store, start_link, []},
-            permanent, 5000, worker, [paxos_store]}
+  Kids = [ {dlog_store,
+            {dlog_store, start_link, []},
+            permanent, 5000, worker, [dlog_store]}
          , {paxos_sync,
             {paxos_sync, start_link, []},
             permanent, 5000, worker, [paxos_sync]}

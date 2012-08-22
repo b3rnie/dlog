@@ -7,7 +7,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%_* Module declaration ===============================================
--module(paxos_sync).
+-module(dlog_sync).
 -behaviour(gen_server).
 
 %%%_* Exports ==========================================================
@@ -23,7 +23,7 @@
         ]).
 
 %%%_* Includes =========================================================
--include_lib("paxos/include/paxos.hrl").
+-include_lib("dlog/include/dlog.hrl").
 
 %%%_* Macros ===========================================================
 -define(retry, 15000). %% 15s
@@ -52,7 +52,7 @@ handle_call(sync, _From, S) ->
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
-handle_info(timeout, #s{d=[]} = S) ->
+handle_info(timeout, #s{disconnected=[]} = S) ->
   {noreply, S};
 handle_info(timeout, S) ->
   {Connected, Disconnected} =
@@ -62,7 +62,7 @@ handle_info(timeout, S) ->
                       false -> {Connected, [Node|Disconnected]}
                     end
                 end, {S#s.connected, []},
-                S0#s.disconnected),
+                S#s.disconnected),
   {noreply, S#s{connected=Connected, disconnected=Disconnected}, ?retry};
 handle_info({Status, Node}, S)
   when Status =:= nodeup;

@@ -1,12 +1,11 @@
 %%-*- mode: erlang -*-
-{application, paxos,
- [ {description,  "paxos"}
+{application, dlog,
+ [ {description,  "dlog"}
  , {vsn,          git}
  , {modules,      []}
  , {registered,   []}
- , {mod,          {paxos_app, []}}
- , {env,          [ {store, paxos_store}
-                  , {id     1} %% 1 - 5
+ , {mod,          {dlog_app, []}}
+ , {env,          [ {id,    1} %% 1 - 5
                   , {nodes, ['paxos1@isaba',
                              'paxos2@isaba',
                              'paxos3@isaba',
@@ -14,6 +13,8 @@
                              'paxos5@isaba']}
                   , {cbmod, dummy_callback} %% called for each submitted
                   , {logdir, "logs/"}
+                  , {slots_per_file, 10000}
+                  , {prune_after, 604800} %% keep at least 1 week
                   ]}
  , {applications, [kernel,stdlib]}
  ]
