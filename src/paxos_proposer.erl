@@ -10,6 +10,7 @@
 %% api
 -export([ start_link/1
         , stop/1
+        , next_sno/3
         ]).
 
 -export([ init/1
@@ -64,8 +65,8 @@ handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
 %% gather promises
-handle_info({promise, LSN, LSV}, #s{nodes=Nodes} = S) ->
-  Promises = [{LSN,LSV} | S#s.promises],
+handle_info({Node, {promise, LN, LV}}, #s{nodes=Nodes} = S) ->
+  Promises = [{LN,LV} | S#s.promises],
   case length(Promises) >= S#s.quorum of
     true ->
       {HN, HV} = highest_n(Promises, {null,null}),
@@ -98,18 +99,34 @@ code_change(_OldVsn, S, _Extra) ->
 
 %%%_ * Internals -------------------------------------------------------
 next_sno(N, Tot, ID)
-  when (N rem Tot+1) =:= ID -> N;
+  when (N rem Tot) =:= ID -> N;
 next_sno(N, Tot, ID) ->
   next_sno(N+1, Tot, ID).
 
-highest_n([{LSN,LSV}|Promises], {null,null}) ->
-  highest_n(Promises, {LSN,LSV});
-highest_n([{LSN,LSV}|Promises], {N,V}) ->
-  case N<LSN of
-    true  -> highest_n(Promises, {LSN,LSV});
-    false -> highest_n(Promises, {N,V})
-  end.
+highest_n([{N,V}|Promises], {null,null}) ->
+  highest_n(Promises, {N,V});
+highest_n([{N,V}|Promises], {PrevN,PrevV}) ->
+  case N>PrevN of
+    true  -> highest_n(Promises, {N,V});
+    false -> highest_n(Promises, {PrevN,PrevV})
+  end;
+highest_n([], {N,V}) -> {N,V}.
 
+
+%%%_* Tests ============================================================
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+next_sno_test() ->
+  3 = next_sno(0, 5, 3),
+  8 = next_sno(4, 5, 3),
+  ok.
+
+highest_n_test() ->
+  {3, baz} = highest_n([{1,foo}, {3,baz}, {2,bar}], {null, null}),
+  ok.
+
+-endif.
 
 %%%_* Emacs ============================================================
 %%% Local Variables:

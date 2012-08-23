@@ -25,10 +25,8 @@
 %%%_* Macros ===========================================================
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { max_nodes
+-record(s, { id
            , nodes
-           , n
-           , id
            }).
 
 %%%_ * API -------------------------------------------------------------
@@ -37,7 +35,6 @@ start_link() ->
 
 %%%_ * gen_server callbacks --------------------------------------------
 init([]) ->
-  {ok, Store} = application:get_env(paxos, store),
   {ok, Nodes} = application:get_env(paxos, nodes),
   {ok, ID}    = application:get_env(paxos, id),
   {ok, #s{nodes=Nodes, id=ID}}.
@@ -52,27 +49,38 @@ handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
 handle_info({Node, {prepare, Slot, N}}, #s{} = S) ->
-  case paxos_store:get_n(Slot) of
-    SN when N > SN ->
-      {LN, LV} = paxos_store:get_accepted(Slot),
-      ok = paxos_store:set_n(Slot, N),
-      paxos_util:send(Node, {promise, LN, LV}),
+  case dlog_store:get_n(Slot) of
+    {ok, Sn}
+      when N > Sn ->
+      {HN, HV} =
+        case dlog_store:get_accepted(Slot) of
+          {ok, {Hn, Hv}} -> {Hn, Hv};
+          {error, no_such_key} -> {null, null}
+        end,
+      ok = dlog_store:set_n(Slot, N),
+      paxos_util:send(Node, {promise, HN, HV}),
       {noreply, S};
-    SN ->
-      paxos_util:send(Node, {reject, SN}),
+    {ok, Sn} ->
+      paxos_util:send(Node, {reject, Sn}),
+      {noreply, S};
+    {error, no_such_key} ->
+      ok = dlog_store:set_n(Slot, N),
+      paxos_util:send(Node, {promise, null, null}),
       {noreply, S}
   end;
-
 handle_info({Node, {propose, Slot, N, V}}, #s{nodes=Nodes} = S) ->
-  case paxos_store:get_n(Slot) of
-    N ->
-      paxos_store:set_accepted(Slot, N, V),
+  case dlog_store:get_n(Slot) of
+    HN when HN =< N ->
+      dlog_store:set_accepted(Slot, N, V),
+      %% dlog_store:set_slot_v(Slot, V),
       paxos_util:broadcast(Nodes, {accepted, Slot, N, V}),
       {noreply, S};
     _ ->
       {noreply, S}
   end;
-
+handle_info({Node, {accept, Slot, N, V}}, #s{} = S) ->
+  dlog_store:set_slot_v(Slot, V),
+  {noreply, S};
 handle_info(Msg, S) ->
   ?warning("~p", [Msg]),
   {noreply, S}.
