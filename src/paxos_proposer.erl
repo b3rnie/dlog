@@ -51,7 +51,7 @@ init([Pid, V]) ->
   Slot        = paxos_store:next_slot(),
   N           = next_sno(0, length(Nodes), ID),
 
-  dlog_store:set_n(Slot, N), %% diskwrite + flush
+  %%dlog_store:set_n(Slot, N), %% diskwrite + flush
   paxos_util:broadcast({prepare, Slot, N}, Nodes),
   {ok, #s{v=V, quorum=Quorum, slot=Slot, n=N, client=Pid, nodes=Nodes}}.
 
@@ -64,9 +64,8 @@ handle_call(stop, _From, S) ->
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
-%% gather promises
-handle_info({Node, {promise, LN, LV}}, #s{nodes=Nodes} = S) ->
-  Promises = [{LN,LV} | S#s.promises],
+handle_info({Node, {promise, PrevN, PrevV}}, #s{nodes=Nodes} = S) ->
+  Promises = [{PrevN,PrevV} | S#s.promises],
   case length(Promises) >= S#s.quorum of
     true ->
       {HN, HV} = highest_n(Promises, {null,null}),

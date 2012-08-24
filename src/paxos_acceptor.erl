@@ -49,16 +49,17 @@ handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
 handle_info({Node, {prepare, Slot, N}}, #s{} = S) ->
+  %% NOTE: check for already accepted
   case dlog_store:get_n(Slot) of
     {ok, Sn}
       when N > Sn ->
-      {HN, HV} =
+      {PrevN, PrevV} =
         case dlog_store:get_accepted(Slot) of
           {ok, {Hn, Hv}} -> {Hn, Hv};
           {error, no_such_key} -> {null, null}
         end,
       ok = dlog_store:set_n(Slot, N),
-      paxos_util:send(Node, {promise, HN, HV}),
+      paxos_util:send(Node, {promise, PrevN, PrevV}),
       {noreply, S};
     {ok, Sn} ->
       paxos_util:send(Node, {reject, Sn}),
@@ -69,15 +70,20 @@ handle_info({Node, {prepare, Slot, N}}, #s{} = S) ->
       {noreply, S}
   end;
 handle_info({Node, {propose, Slot, N, V}}, #s{nodes=Nodes} = S) ->
+  %% NOTE: check for already accepted
   case dlog_store:get_n(Slot) of
     HN when HN =< N ->
       dlog_store:set_accepted(Slot, N, V),
       %% dlog_store:set_slot_v(Slot, V),
+      %% send accept msg to just coordinator? have coordinator order accept?
       paxos_util:broadcast(Nodes, {accepted, Slot, N, V}),
       {noreply, S};
     _ ->
       {noreply, S}
   end;
+handle_info({Node, {accepted, Slot, N, V}
+
+
 handle_info({Node, {accept, Slot, N, V}}, #s{} = S) ->
   dlog_store:set_slot_v(Slot, V),
   {noreply, S};

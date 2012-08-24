@@ -17,10 +17,10 @@
 %%%_* Code =============================================================
 %%%_ * API -------------------------------------------------------------
 send(Msg, Node) ->
-  {paxos_server, Node} ! Msg.
+  {dlog_paxos_server, Node} ! Msg.
 
 broadcast(Msg, Nodes) ->
-  lists:foreach(fun(Node) -> {paxos_server, Node} ! Msg end, Nodes).
+  lists:foreach(fun(Node) -> {dlog_paxos_server, Node} ! Msg end, Nodes).
 
 quorum(N)
   when erlang:is_integer(N), N > 0 ->
