@@ -15,6 +15,9 @@
 %%%_ * API -------------------------------------------------------------
 %% @doc submit value to log
 submit(V, Timeout) ->
+  dlog_paxos_server:submit(V, Timeout).
+
+
   {ok, Pid} = paxos_proposer:start_link(V),
   receive {Pid, Res} -> Res
   after Timeout ->

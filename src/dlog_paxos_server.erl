@@ -1,9 +1,9 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%% @doc
+%%% @doc Entrance for all paxos related communication
 %%% @copyright 2012 Bjorn Jensen-Urstad
 %%% @end
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--module(paxos_acceptor).
+-module(dlog_paxos_server).
 -behaviour(gen_server).
 
 %%%_* Exports ==========================================================
@@ -27,26 +27,42 @@
 %%%_ * Types -----------------------------------------------------------
 -record(s, { id
            , nodes
+           , quorum
+           , fsms=dict:new()
            }).
+
+-record(fsm, {pid}).
 
 %%%_ * API -------------------------------------------------------------
 start_link() ->
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+submit(V, Timeout) ->
+  gen_server:call(?MODULE, {submit, V, Timeout}, infinity).
+
 %%%_ * gen_server callbacks --------------------------------------------
 init([]) ->
-  {ok, Nodes} = application:get_env(paxos, nodes),
   {ok, ID}    = application:get_env(paxos, id),
+  {ok, Nodes} = application:get_env(paxos, nodes),
+  Quorum      = paxos_util:quorum(erlang:length(Nodes)),
   {ok, #s{nodes=Nodes, id=ID}}.
 
 terminate(_Rsn, S) ->
   ok.
 
-handle_call(sync, _From, S) ->
-  {reply, ok, S}.
+handle_call({submit, V, _Timeout}, From, #s{fsms=Fsms0} = S) ->
+  %% no timeouts for now
+  Slot = dlog_store:get_next_slot(),
+  {ok, Pid} = dlog_paxos_fsm:start_link(Slot, V),
+  Fsms1 = dict:insert({pid, Pid}, {Slot, From}, Fsms0),
+  Fsms  = dict:insert({slot, Slot}, Pid, Fsms1),
+  {reply, ok, S#s{fsms=Fsms}}.
 
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
+
+handle_info({paxos, _} = Msg, S) ->
+  
 
 handle_info({Node, {prepare, Slot, N}}, #s{} = S) ->
   %% NOTE: check for already accepted

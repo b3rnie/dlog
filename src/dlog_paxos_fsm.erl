@@ -1,16 +1,14 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%% @doc
+%%% @doc paxos fsm
 %%% @copyright 2012 Bjorn Jensen-Urstad
 %%% @end
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--module(paxos_proposer).
+-module(dlog_paxos_fsm).
 -behaviour(gen_server).
 
 %%%_* Exports ==========================================================
 %% api
--export([ start_link/1
-        , stop/1
-        , next_sno/3
+-export([ start_link/0
         ]).
 
 -export([ init/1
@@ -27,26 +25,20 @@
 %%%_* Macros ===========================================================
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { v
-           , promises=[]
-           , quorum
-           , slot
-           , n
-           , client
+-record(s, { id
            , nodes
+           , slot
+           , v=nop
            }).
 
 %%%_ * API -------------------------------------------------------------
-start_link(V) ->
-  gen_server:start_link({local, ?MODULE}, ?MODULE, [self(), V], []).
-
-stop(Pid) ->
-  gen_server:cast(Pid, stop).
+start_link() ->
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%_ * gen_server callbacks --------------------------------------------
-init([Pid, V]) ->
-  {ok, ID}    = application:get_env(paxos, id),
+init([Slot, V]) ->
   {ok, Nodes} = application:get_env(paxos, nodes),
+  {ok, ID}    = application:get_env(paxos, id),
   Quorum      = paxos_util:quorom(length(Nodes)),
   Slot        = paxos_store:next_slot(),
   N           = next_sno(0, length(Nodes), ID),
@@ -55,17 +47,35 @@ init([Pid, V]) ->
   paxos_util:broadcast({prepare, Slot, N}, Nodes),
   {ok, #s{v=V, quorum=Quorum, slot=Slot, n=N, client=Pid, nodes=Nodes}}.
 
-terminate(_Rsn, _S) ->
+terminate(_Rsn, S) ->
   ok.
 
-handle_call(stop, _From, S) ->
-  {stop, normal, ok, S}.
+handle_call(sync, _From, S) ->
+  {reply, ok, S}.
 
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
-handle_info({Node, {promise, PrevN, PrevV}}, #s{nodes=Nodes} = S) ->
-  Promises = [{PrevN,PrevV} | S#s.promises],
+%% proposer
+handle_cast({Node, {promise, N, V}}, S) -> do_promise(Node, N, V, S);
+
+%% acceptor
+handle_cast({Node, {prepare, N}}, S)    -> do_prepare(Node, N, S);
+handle_cast({Node, {propose, N, V}}, S) -> do_propose(Node, N, V, S);
+
+%% learner
+handle_cast({Node, {accepted, N, V}}, S) -> do_accepted(Node, N, V, S).
+
+handle_info(Msg, S) ->
+  ?warning("~p", [Msg]),
+  {noreply, S}.
+
+code_change(_OldVsn, S, _Extra) ->
+  {ok, S}.
+
+%%%_ * Internals proposer specific -------------------------------------
+do_promise(Node, N, V, S) ->
+  Promises = [{N,V} | S#s.promises],
   case length(Promises) >= S#s.quorum of
     true ->
       {HN, HV} = highest_n(Promises, {null,null}),
@@ -79,24 +89,49 @@ handle_info({Node, {promise, PrevN, PrevV}}, #s{nodes=Nodes} = S) ->
       end;
     false ->
       {noreply, S#s{promises=Promises}}
-  end;
+  end.
 
-handle_info({reject, SN}, S) ->
-  {noreply, S};
+%%%_ * Internals acceptor specific -------------------------------------
+do_prepare(Node, N, #s{slot=Slot} = S) ->
+  %% NOTE: check for already accepted
+  case dlog_store:get_n(Slot) of
+    {ok, Sn}
+      when N > Sn ->
+      {PrevN, PrevV} =
+        case dlog_store:get_accepted(Slot) of
+          {ok, {Hn, Hv}} -> {Hn, Hv};
+          {error, no_such_key} -> {null, null}
+        end,
+      ok = dlog_store:set_n(Slot, N),
+      paxos_util:send(Node, {promise, PrevN, PrevV}),
+      {noreply, S};
+    {ok, Sn} ->
+      paxos_util:send(Node, {reject, Sn}),
+      {noreply, S};
+    {error, no_such_key} ->
+      ok = dlog_store:set_n(Slot, N),
+      paxos_util:send(Node, {promise, null, null}),
+      {noreply, S}
+  end.
 
-handle_info({accepted, Slot, N, V}, S) ->
-  ok = dlog_store:set_slot_v(Slot, V),
-  S#s.client ! {self(), ok},
-  {stop, normal, S};
+do_propose(Node, N, V, #s{nodes=Nodes} = S) ->
+  %% NOTE: check for already accepted
+  case dlog_store:get_n(Slot) of
+    HN when HN =< N ->
+      dlog_store:set_accepted(Slot, N, V),
+      %% dlog_store:set_slot_v(Slot, V),
+      %% send accept msg to just coordinator? have coordinator order accept?
+      paxos_util:broadcast(Nodes, {accepted, Slot, N, V}),
+      {noreply, S};
+    _ ->
+      {noreply, S}
+  end.
 
-handle_info(Msg, S) ->
-  ?warning("~p", [Msg]),
+%%%_ * Internals proposer specific -------------------------------------
+do_accepted(Node, N, V, S) ->
+  dlog_store:set_slot_v(Slot, V),
   {noreply, S}.
 
-code_change(_OldVsn, S, _Extra) ->
-  {ok, S}.
-
-%%%_ * Internals -------------------------------------------------------
 next_sno(N, Tot, ID)
   when (N rem Tot) =:= ID -> N;
 next_sno(N, Tot, ID) ->
@@ -110,7 +145,6 @@ highest_n([{N,V}|Promises], {PrevN,PrevV}) ->
     false -> highest_n(Promises, {PrevN,PrevV})
   end;
 highest_n([], {N,V}) -> {N,V}.
-
 
 %%%_* Tests ============================================================
 -ifdef(TEST).
