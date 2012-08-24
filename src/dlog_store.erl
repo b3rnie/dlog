@@ -12,7 +12,17 @@
         , stop/0
 
         , get_next_slot/0
+        , set_next_slot/1
         , set_slot_v/2
+        , get_n/1
+        , get_accepted/1
+        , set_n/2
+        , set_accepted/2
+        , set_propose/2
+        ]).
+
+-export([ index_file/1
+        , log_files/1
         ]).
 
 -export([ init/1
@@ -27,13 +37,12 @@
 -include_lib("dlog/include/dlog.hrl").
 
 %%%_* Macros ===========================================================
--define(slots_per_file, 5000).
 
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
 -record(s, { logdir
-           , slots
-           , prune
+           , slots_per_file
+           , prune_after
            , index
            , logs
            }).
@@ -55,7 +64,7 @@ set_slot_v(Slot, V) ->
   call({write, Slot, {Slot, V}}).
 
 get_n(Slot) ->
-  call({read,  Slot, {n, Slot}}).
+  call({read, Slot, {n, Slot}}).
 
 get_accepted(Slot) ->
   call({read, Slot, {accepted, Slot}}).
@@ -65,23 +74,20 @@ set_n(Slot, N) ->
   call({write_sync, Slot, {{n, Slot}, N}}).
 
 %% REQUIRES diskwrite + flush
-set_accepted(Slot, N, V) ->
+set_accepted(Slot, {N, V}) ->
   call({write_sync, Slot, {{accepted, Slot}, {N, V}}}).
 
 %% REQUIRES diskwrite + flush
-set_propose(Slot, N, V) ->
-  call({write_sync, Slot, {{propose, Slot}, {N, V}}}).
+set_propose(Slot, {N, V}) ->
+  call({write_sync, Slot, {{xpropose, Slot}, {N, V}}}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init([]) ->
-  {ok, Dir}   = application:get_env(dlog, logdir),
-  {ok, Slots} = application:get_env(dlog, slots_per_file),
-  {ok, Prune} = application:get_env(dlog, prune_after),
-  _ = filelib:ensure_dir(filename:join([Dir, "dummy"])),
-  Index = open_index(Dir),
-  Logs  = open_logs(Dir),
-  _ = assert_state(Index, Logs),
-  {ok, #s{logdir=Dir, slots=Slots, prune=Prune, index=Index, logs=Logs}}.
+  {ok, Dir} = application:get_env(dlog, logdir),
+  case file:exists(index_file(Dir)) of
+    true  -> {ok, init_old(Dir)};
+    false -> {ok, init_new(Dir)}
+  end.
 
 terminate(_Rsn, S) ->
   lists:foreach(fun({_, Name}) -> ok = dets:close(Name) end, S#s.logs),
@@ -138,7 +144,28 @@ handle_info(Msg, S) ->
 code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
-%%%_ * Internals -------------------------------------------------------
+%%%_ * Internals startup -----------------------------------------------
+init_new(Dir) ->
+  {ok, Slots} = application:get_env(dlog, slots_per_file),
+  {ok, Prune} = application:get_env(dlog, prune_after),
+  _     = ensure_dir(Dir),
+  Logs  = open_logs(Dir),
+  Index = open_index(Dir),
+  ok = dets:insert(Index, {slots_per_file, Slots}),
+  ok = dets:insert(Index, {prune_after, Prune}),
+  ok = dets:sync(Index),
+  #s{logdir=Dir, slots_per_file=Slots, prune=Prune, index=Index, logs=Logs}.
+
+init_old(Dir) ->
+  Index   = open_index(Dir),
+  Logs    = open_logs(Dir),
+  [Slots] = dets:lookup(Index, slots_per_file),
+  [Prune] = dets:lookup(Index, prune_after),
+  #s{logdir=Dir, slots_per_file=Slots, prune=Prune, index=Index, logs=Logs}.
+
+ensure_dir(Dir) ->
+  filelib:ensure_dir(filename:join([Dir, "dummy"])),
+
 open_index(Dir) ->
   open(index_file(Dir)).
 
@@ -149,9 +176,11 @@ open_logs(Dir) ->
                 {N, open(File)}
             end, log_files(Dir)).
 
-assert_state(Index, Logs) ->
-  %%ok=dets:delete(Name, Key),
-  dets:insert_new(Index, {next_slot, 1}).
+log_files(Dir) ->
+  filelib:wildcard(filename:join([Dir, "dlog_log_*"])).
+
+index_file(Dir) ->
+  filename:join([Dir, "dlog_index"]).
 
 open(File) ->
   Name = erlang:list_to_atom(File),
@@ -161,6 +190,7 @@ open(File) ->
 close(Name) ->
   ok = dets:close(Name).
 
+%%%_ * Slot calculation ------------------------------------------------
 slot_to_lognumber(Slot, SlotsPerFile) ->
   (Slot - (Slot rem SlotsPerFile)) div SlotsPerFile.
 
@@ -170,25 +200,19 @@ n_to_file(LogDir, N) ->
 
 call(Args) -> gen_server:call(?MODULE, Args).
 
-log_files(Dir) ->
-  filelib:wildcard(filename:join([Dir, "dlog_log_*"])).
-
-index_file(Dir) ->
-  filename:join([Dir, "dlog_index"]).
-
 %%%_* Tests ============================================================
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 
 next_slot_test() ->
-  _ = application:load(dlog),
-  _ = clean(),
-  {ok, _} = dlog_store:start_link(),
-  1 = get_next_slot(),
-  2 = get_next_slot(),
-  3 = get_next_slot(),
-  dlog_store:stop(),
-  ok.
+  F = fun() ->
+          {ok, _} = dlog_store:start_link(),
+          1 = get_next_slot(),
+          2 = get_next_slot(),
+          3 = get_next_slot(),
+          dlog_store:stop()
+      end,
+  dlog_test_lib:in_clean_env(F).
 
 slot_to_file_test() ->
   ok.
@@ -200,19 +224,13 @@ filename_test() ->
   ok.
 
 basic_test() ->
-  _ = application:load(dlog),
-  _ = clean(),
-  {ok, Pid} = dlog_store:start_link(),
-  ok        = set_n(123, 456),
-  {ok, 456} = get_n(123),
-  dlog_store:stop(),
-  ok.
-
-clean() ->
-  {ok, Dir} = application:get_env(dlog, logdir),
-  lists:foreach(fun(File) ->
-                    _ = file:delete(File)
-                end, [index_file(Dir) | log_files(Dir)]).
+  F = fun() ->
+          {ok, Pid} = dlog_store:start_link(),
+          ok        = set_n(123, 456),
+          {ok, 456} = get_n(123),
+          dlog_store:stop()
+      end,
+  dlog_test_lib:in_clean_env(F).
 
 -endif.
 
