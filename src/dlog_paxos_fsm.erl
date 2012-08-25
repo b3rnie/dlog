@@ -28,33 +28,39 @@
 -record(s, { id
            , nodes
            , slot
-           , v=nop
+           , quorum
+           , v
            }).
 
 %%%_ * API -------------------------------------------------------------
-start_link() ->
-  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(Slot) ->
+  gen_server:start_link(?MODULE, ?MODULE, [Slot], []).
+
+submit(Pid, V) ->
+  gen_server:cast(Pid, {submit, V}).
+
+message(Pid, Msg) ->
+  gen_server:cast(?MOULE, Msg).
 
 %%%_ * gen_server callbacks --------------------------------------------
-init([Slot, V]) ->
+init([Slot]) ->
   {ok, Nodes} = application:get_env(paxos, nodes),
   {ok, ID}    = application:get_env(paxos, id),
-  Quorum      = paxos_util:quorom(length(Nodes)),
-  Slot        = paxos_store:next_slot(),
-  N           = next_sno(0, length(Nodes), ID),
-
-  %%dlog_store:set_n(Slot, N), %% diskwrite + flush
-  paxos_util:broadcast({prepare, Slot, N}, Nodes),
-  {ok, #s{v=V, quorum=Quorum, slot=Slot, n=N, client=Pid, nodes=Nodes}}.
+  Quorum      = paxos_util:quorom(erlang:length(Nodes)),
+  {ok, #s{quorum=Quorum, slot=Slot, nodes=Nodes, id=ID}}.
 
 terminate(_Rsn, S) ->
   ok.
 
-handle_call(sync, _From, S) ->
-  {reply, ok, S}.
+handle_call(stop, _From, S) ->
+  {stop, normal, ok, S}.
 
-handle_cast(_Msg, S) ->
-  {stop, bad_cast, S}.
+%% client initiated submission
+handle_cast({submit, V}, S) ->
+  N = next_sno(0, erlang:length(S#s.nodes), S#s.id),
+  %%dlog_store:set_n(Slot, N), %% diskwrite + flush
+  dlog_transport:broadcast({Slot, {Node, {prepare, N}}}),
+  {noreply, S#s{v=V}}.
 
 %% proposer
 handle_cast({Node, {promise, N, V}}, S) -> do_promise(Node, N, V, S);
@@ -76,16 +82,16 @@ code_change(_OldVsn, S, _Extra) ->
 %%%_ * Internals proposer specific -------------------------------------
 do_promise(Node, N, V, S) ->
   Promises = [{N,V} | S#s.promises],
-  case length(Promises) >= S#s.quorum of
+  case erlang:length(Promises) >= S#s.quorum of
     true ->
       {HN, HV} = highest_n(Promises, {null,null}),
       if HV =:= null ->
           dlog_store:set_propose(S#s.slot, S#s.n, S#s.v), %% diskwrite + flush
-          paxos_util:broadcast(
+          dlog_transport:broadcast({Slot, {Node, 
             {propose, S#s.slot, S#s.n, S#s.v}, Nodes);
          true ->
           dlog_store:set_propose(S#s.slot, HN, HV), %% diskwrite + flush
-          paxos_util:broadcast({propose, S#s.slot, HN, HV}, Nodes)
+          dlog_transport:broadcast({propose, S#s.slot, HN, HV}, Nodes)
       end;
     false ->
       {noreply, S#s{promises=Promises}}
@@ -103,14 +109,14 @@ do_prepare(Node, N, #s{slot=Slot} = S) ->
           {error, no_such_key} -> {null, null}
         end,
       ok = dlog_store:set_n(Slot, N),
-      paxos_util:send(Node, {promise, PrevN, PrevV}),
+      dlog_transport:send(Node, {promise, PrevN, PrevV}),
       {noreply, S};
     {ok, Sn} ->
-      paxos_util:send(Node, {reject, Sn}),
+      dlog_transport:send(Node, {reject, Sn}),
       {noreply, S};
     {error, no_such_key} ->
       ok = dlog_store:set_n(Slot, N),
-      paxos_util:send(Node, {promise, null, null}),
+      dlog_transport:send(Node, {promise, null, null}),
       {noreply, S}
   end.
 
@@ -121,16 +127,18 @@ do_propose(Node, N, V, #s{nodes=Nodes} = S) ->
       dlog_store:set_accepted(Slot, N, V),
       %% dlog_store:set_slot_v(Slot, V),
       %% send accept msg to just coordinator? have coordinator order accept?
-      paxos_util:broadcast(Nodes, {accepted, Slot, N, V}),
+      dlog_transport:broadcast(Nodes, {accepted, Slot, N, V}),
       {noreply, S};
     _ ->
       {noreply, S}
   end.
 
-%%%_ * Internals proposer specific -------------------------------------
+%%%_ * Internals learner specific --------------------------------------
 do_accepted(Node, N, V, S) ->
   dlog_store:set_slot_v(Slot, V),
   {noreply, S}.
+
+%%%_ * -----------------------------------------------------------------
 
 next_sno(N, Tot, ID)
   when (N rem Tot) =:= ID -> N;
