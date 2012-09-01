@@ -25,10 +25,14 @@
 %%%_* Macros ===========================================================
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { role            %% master | slave
-           , catchup_pid
-           , heartbeat_tref
-           , lease_tref
+-record(s, { catchup_pid      :: undefined | pid()
+           , promises    = [] :: list()
+           , accepts     = [] :: list()
+           , requests    = [] :: list()
+           %% config
+           , round_timeout    :: integer()
+           , quorum           :: integer()
+           , nodes            :: list()
            }).
 
 %%%_ * API -------------------------------------------------------------
@@ -44,17 +48,23 @@ role() ->
 %%%_ * gen_server callbacks --------------------------------------------
 init([]) ->
   erlang:process_flag(trap_exit, true),
-  {ok, Pid} = dlog_catchup:start_link(),
-  {ok, #s{role=slave, catchup_pid=Pid}}.
+  {ok, Nodes}        = application:get_env(dlog, nodes),
+  {ok, Id}           = application:get_env(dlog, id),
+  {ok, RoundTimeout} = application:get_env(dlog, round_timeout),
+  Quorum             = dlog_util:quorum(erlang:length(Nodes)),
+  {ok, Pid}          = dlog_catchup:start_link(),
+  {ok, #s{catchup_pid=Pid, quorum=Quorum, nodes=Nodes,
+          round_timeout=RoundTimeout}}.
 
 terminate(_Rsn, S) ->
   ok.
 
-handle_call({submit, _V, _Timeout}, From, #s{state=slave} = S) ->
-  {reply, {error, is_slave}, S};
 handle_call({submit, V, _Timeout}, From, #s{fsms=Fsms0} = S) ->
   Slot = dlog_store:next_free_slot(),
-  dlog_transport:broadcast({Slot, node(), {propose, N, V}}),
+  case S#s.is_leader of
+    true  -> dlog_transport:broadcast({Slot, node(), {propose, N, V}}, Nodes);
+    false -> dlog_transport:broadcast({Slot, node(), {prepare, N}}, Nodes)
+  end,
   {noreply, S};
 
 handle_cast(_Msg, S) ->
@@ -67,15 +77,71 @@ handle_info(lease_timeout, S) ->
   {noreply, S};
 
 handle_info({Slot, Node, {prepare, N}}, S) ->
-  {noreply, S};
+  case dlog_store:get_slot_v(Slot) of
+    {ok, _V} ->
+      dlog_transport:send({Slot, node(), {reject, decided}}, Node),
+      {noreply, S};
+    {error, no_such_key} ->
+      %% 1. Promise to never accept a proposal numbered less than N
+      %% 2. Proposal with highest number less than N accepted (if any)
+      case dlog_store:get_n(Slot) of
+        {ok, Sn}
+          when N > Sn ->
+          {PrevN, PrevV} =
+            case dlog_store:get_accepted(Slot) of
+              {ok, {Hn, Hv}}       -> {Hn, Hv};
+              {error, no_such_key} -> {null, null}
+            end,
+          ok = dlog_store:set_n(Slot, N), %% diskwrite + flush
+          dlog_transport:send({Slot, node(), {promise, PrevN, PrevV}}, Node),
+          {noreply, S};
+        {ok, Sn} ->
+          dlog_transport:send({Slot, node(), {reject, {seen, Sn}}}, Node),
+          {noreply, S};
+        {error, no_such_key} ->
+          ok = dlog_store:set_n(Slot, N), %% diskwrite + flush
+          dlog_transport:send({Slot, node(), {promise, null, null}}, Node),
+          {noreply, S}
+      end
+  end;
 
-handle_info({Slot, Node, {promise, N, {PN,PV}}}, S) ->
-  {noreply, S};
+handle_info({Slot, Node, {promise, N, {PrevN,PrevV}}}, S) ->
+  Promises = [{PrevN,PrevV} | S#s.promises],
+  case erlang:length(Promises) >= S#s.quorum of
+    true ->
+      {HN, HV} = highest_n(Promises, {null,null}),
+      if HV =:= null ->
+          dlog_store:set_propose(Slot, {S#s.n, S#s.v}), %% diskwrite + flush
+          dlog_transport:broadcast({Slot, node(), {propose, N, S#s.v}}, Nodes);
+         true ->
+          dlog_store:set_propose(Slot, {HN, HV}), %% diskwrite + flush
+          dlog_transport:broadcast({Slot, node(), {propose, HN, HV}}, Nodes)
+      end;
+    false ->
+      {noreply, S#s{promises=Promises}}
+  end;
 
 handle_info({Slot, Node, {propose, N, V}}, S) ->
-  {noreply, S}
+  case dlog_store:get_slot_v(Slot) of
+    {ok, _} ->
+      dlog_store:send({Slot, node(), {reject, decided}}, Node);
+    {error, no_such_key} ->
+      case dlog_store:get_n(Slot) of
+        HN when HN =< N ->
+          dlog_store:set_accepted(Slot, N, V),
+          dlog_transport:broadcast({Slot, node(), {accepted, Slot, N, V}},
+                                   Nodes),
+      {noreply, S};
+    _ ->
+      {noreply, S}
+  end.
 
 handle_info({Slot, Node, {accepted, N}}, S) ->
+  Accepts = [{Node, N} | S#s.accepts],
+  case erlang:length(Accepts) >= S#s.quorum of
+    true  ->
+      dlog_store:set_slot_v(Slot, V),
+      
   {noreply, S};
 
 handle_info({'EXIT', Pid, normal}, #s{catchup_pid=Pid} = S) ->

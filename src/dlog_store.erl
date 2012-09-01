@@ -63,6 +63,7 @@ set_next_slot(Slot) -> call({set_next_slot, Slot}).
 
 %% logs
 set_slot_v(Slot, V) -> call({write, Slot, {Slot, V}}).
+get_slot_v(Slot)    -> call({read, Slot, Slot}).
 get_n(Slot)         -> call({read, Slot, {n, Slot}}).
 get_accepted(Slot)  -> call({read, Slot, {accepted, Slot}}).
 
