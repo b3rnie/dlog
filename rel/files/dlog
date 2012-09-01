@@ -1,0 +1,44 @@
+#!/bin/sh
+RUNNER_SCRIPT_DIR=$(cd ${0%/*} && pwd)
+
+RUNNER_BASE_DIR=${RUNNER_SCRIPT_DIR%/*}
+
+SCRIPT=`basename $0`
+PIPE_DIR={{pipe_dir}}
+
+ERTS_PATH=$RUNNER_BASE_DIR/erts-$ERTS_VSN/bin
+
+case "$1" in
+    start)
+        ;;
+    stop)
+        ;;
+    attach)
+        RES=`ping_node`
+        ES=$?
+        if [ "$ES" -ne 0 ]; then
+             echo "Node is not running!"
+             exit $ES
+        fi
+        shift
+        exec $ERTS_PATH/to_erl $PIPE_DIR
+        ;;
+    console)
+        # Make sure a node is running
+        RES=`ping_node`
+        ES=$?
+        if [ "$ES" -ne 0 ]; then
+             echo "Node is not running!"
+             exit $ES
+        fi
+        shift
+        exec $ERTS_PATH/to_erl $PIPE_DIR
+        ;;
+    *)
+        echo "Usage: $SCRIPT start|stop|attach|console"
+        ;;
+esac
+
+exit 0
+
+#eof

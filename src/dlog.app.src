@@ -14,7 +14,9 @@
                   , {cbmod, dummy_callback} %% called for each submitted
                   , {logdir, "logs/"}
                   , {slots_per_file, 10000}
-                  , {prune_after, 604800} %% keep at least 1 week
+                  , {prune_after, 604800} %% seconds keep at least 1 week
+                  , {master_lease,     15000}
+                  , {master_heartbeat, 1000}
                   ]}
  , {applications, [kernel,stdlib]}
  ]

@@ -7,23 +7,19 @@
 
 %%%_* Exports ==========================================================
 %% api
--export([ submit/2
+-export([ submit/1
+        , submit/2
+        , role/0
         ]).
 
 %%%_* Macros ===========================================================
+-define(timeout, 5000).
+
 %%%_* Code =============================================================
 %%%_ * API -------------------------------------------------------------
-%% @doc submit value to log
-submit(V, Timeout) ->
-  dlog_paxos_server:submit(V, Timeout).
-
-
-  {ok, Pid} = paxos_proposer:start_link(V),
-  receive {Pid, Res} -> Res
-  after Timeout ->
-      paxos_proposer:stop(Pid),
-      {error, timeout}
-  end.
+submit(V)          -> submit(V, ?timeout).
+submit(V, Timeout) -> dlog_server:submit(V, Timeout).
+role()             -> dlog_server:role().
 
 %%%_ * Internals -------------------------------------------------------
 
@@ -32,3 +28,7 @@ submit(V, Timeout) ->
 %%% allout-layout: t
 %%% erlang-indent-level: 2
 %%% End:
+
+%% leader election
+%% views / reigns (epoch)
+%% slots

@@ -10,7 +10,6 @@
 %% api
 -export([ start_link/0
         , stop/0
-
         , get_next_slot/0
         , set_next_slot/1
         , set_slot_v/2
@@ -54,32 +53,30 @@ start_link() ->
 stop() ->
   call(stop).
 
-get_next_slot() ->
-  call(get_next_slot).
+%% leader
+get_leader()   -> call(get_leader).
+set_leader(Id) -> call({set_leader, Id}).
 
-set_next_slot(Slot) ->
-  call({set_next_slot, Slot}).
+%% index
+get_next_slot()     -> call(get_next_slot).
+set_next_slot(Slot) -> call({set_next_slot, Slot}).
 
-set_slot_v(Slot, V) ->
-  call({write, Slot, {Slot, V}}).
+%% logs
+set_slot_v(Slot, V) -> call({write, Slot, {Slot, V}}).
+get_n(Slot)         -> call({read, Slot, {n, Slot}}).
+get_accepted(Slot)  -> call({read, Slot, {accepted, Slot}}).
 
-get_n(Slot) ->
-  call({read, Slot, {n, Slot}}).
-
-get_accepted(Slot) ->
-  call({read, Slot, {accepted, Slot}}).
-
-%% REQUIRES diskwrite + flush
+%% NOTE: diskwrite + flush
 set_n(Slot, N) ->
   call({write_sync, Slot, {{n, Slot}, N}}).
 
-%% REQUIRES diskwrite + flush
+%% NOTE diskwrite + flush
 set_accepted(Slot, {N, V}) ->
   call({write_sync, Slot, {{accepted, Slot}, {N, V}}}).
 
-%% REQUIRES diskwrite + flush
+%% NOTE diskwrite + flush
 set_propose(Slot, {N, V}) ->
-  call({write_sync, Slot, {{xpropose, Slot}, {N, V}}}).
+  call({write_sync, Slot, {{propose, Slot}, {N, V}}}).
 
 %%%_ * gen_server callbacks --------------------------------------------
 init([]) ->
@@ -132,7 +129,11 @@ handle_call({write, Slot, Obj}, _From, S) ->
       {reply, ok, S#s{logs=[{N,Name}|S#s.logs]}}
   end;
 handle_call(get_next_slot, _From, S) ->
-  {reply, dets:update_counter(S#s.index, next_slot, 1)-1, S}.
+  [{_,Slot}] = dets:lookup(next_slot, S#s.index),
+  {reply, Slot, S};
+handle_call({set_next_slot, Slot}, _From, S) ->
+  ok = dets:insert({next_slot, Slot}, S#s.index),
+  {reply, ok, S}.
 
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
@@ -153,6 +154,7 @@ init_new(Dir) ->
   Index = open_index(Dir),
   ok = dets:insert(Index, {slots_per_file, Slots}),
   ok = dets:insert(Index, {prune_after, Prune}),
+  ok = dets:insert(Indec, {next_slot, 1}),
   ok = dets:sync(Index),
   #s{logdir=Dir, slots_per_file=Slots, prune=Prune, index=Index, logs=Logs}.
 
@@ -207,9 +209,9 @@ call(Args) -> gen_server:call(?MODULE, Args).
 next_slot_test() ->
   F = fun() ->
           {ok, _} = dlog_store:start_link(),
-          1 = get_next_slot(),
+          1  = get_next_slot(),
+          ok = set_next_slot(2),
           2 = get_next_slot(),
-          3 = get_next_slot(),
           dlog_store:stop()
       end,
   dlog_test_lib:in_clean_env(F).

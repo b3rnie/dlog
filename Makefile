@@ -2,39 +2,35 @@
 
 suite = $(if $(SUITE), suite=$(SUITE), )
 
-.PHONY:	all deps check test clean
+.PHONY:	all deps check compile rel dist xref test clean distclean
 
 all:	deps compile
 
 deps:
 	./rebar get-deps
+	git submodule update --init
 
 compile:
 	./rebar compile
 
-rel:	deps
-	./rebar compile generate
+rel:	all
+	./rebar generate
 
-docs:
-	./rebar doc
+dist:	rel
+	tar -czf dlog.tar.gz rel/dlog
 
-check:
-	./rebar check-plt
-	./rebar dialyze
+xref:
+	./rebar xref
 
 test:
 	./rebar eunit $(suite) skip_deps=true
 
-
-relclean:
-	rm -rf rel/paxos
-
-conf_clean:
-	@:
-
 clean:
 	./rebar clean
-	$(RM) doc/*
-	$(RM) ebin/.d
+
+distclean:	clean
+	./rebar delete-deps
+	rm -rf rel/dlog
+	rm dlog.tar.gz
 
 #eof

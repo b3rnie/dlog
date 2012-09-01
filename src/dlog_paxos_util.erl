@@ -22,6 +22,11 @@ send(Msg, Node) ->
 broadcast(Msg, Nodes) ->
   lists:foreach(fun(Node) -> {dlog_paxos_server, Node} ! Msg end, Nodes).
 
+
+now_in_ms() ->
+  {Ms, S, Us} = erlang:now(),
+  1000000000*Ms + S*1000 + erlang:trunc(Us/1000).
+
 quorum(N)
   when erlang:is_integer(N), N > 0 ->
   erlang:trunc(N/2)+1.

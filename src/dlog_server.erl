@@ -3,7 +3,7 @@
 %%% @copyright 2012 Bjorn Jensen-Urstad
 %%% @end
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--module(dlog_paxos_server).
+-module(dlog_server).
 -behaviour(gen_server).
 
 %%%_* Exports ==========================================================
@@ -25,7 +25,10 @@
 %%%_* Macros ===========================================================
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, {fsms=dict:new()
+-record(s, { role            %% master | slave
+           , catchup_pid
+           , heartbeat_tref
+           , lease_tref
            }).
 
 %%%_ * API -------------------------------------------------------------
@@ -35,42 +38,52 @@ start_link() ->
 submit(V, Timeout) ->
   gen_server:call(?MODULE, {submit, V, Timeout}, infinity).
 
+role() ->
+  gen_server:call(?MODULE, role).
+
 %%%_ * gen_server callbacks --------------------------------------------
 init([]) ->
   erlang:process_flag(trap_exit, true),
-  {ok, #s{nodes=Nodes, id=ID}}.
+  {ok, Pid} = dlog_catchup:start_link(),
+  {ok, #s{role=slave, catchup_pid=Pid}}.
 
 terminate(_Rsn, S) ->
   ok.
 
+handle_call({submit, _V, _Timeout}, From, #s{state=slave} = S) ->
+  {reply, {error, is_slave}, S};
 handle_call({submit, V, _Timeout}, From, #s{fsms=Fsms0} = S) ->
-  %% no timeouts for now
-  %% no replies for now
-  Slot = dlog_store:get_next_slot(),
-  {ok, Pid} = dlog_paxos_fsm:start_link(Slot),
-  ok = dlog_paxos_fsm:submit(Pid, V),
-  Fsms = insert_fsm(Pid, Slot, S#s.fsms),
-  {ok, _} = timer:send_after(15000, {stop_fsm, {Slot, Pid}}),
-  {reply, ok, S#s{fsms=Fsms}}.
+  Slot = dlog_store:next_free_slot(),
+  dlog_transport:broadcast({Slot, node(), {propose, N, V}}),
+  {noreply, S};
 
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
-handle_info({paxos, {Slot, Msg}}, S) ->
-  case dict:find({slot, Slot}, S#s.fsms) of
-    {ok, Pid} -> dlog_paxos_fsm:message(Pid, Msg),
-                 {noreply, S};
-    error     -> {ok, Pid} = dlog_paxos_fsm:start_link(Slot),
-                 Fsms = insert_fsm(Pid, Slot, S#s.fsms),
-                 {noreply, S#s{fsms=Fsms}}
-  end;
-handle_info({'EXIT', Pid, normal}, S) ->
-  Slot = dict:fetch(Pid, S#s.fsms),
-  Pid  = dict:fetch(Slot, S#s.fsms),
-  Fsms = delete_fsm(Pid, Slot, S#s.fsms),
-  {noreply, S#s{fsms=Fsms}};
-handle_info({'EXIT', Pid, Rsn}, S) ->
+%% lease has timed out, try become master
+handle_info(lease_timeout, S) ->
+  Slot = dlog_store:next_free_slot(),
+  dlog_transport:broadcast({Slot, node(), {prepare, N}}, S#s.nodes),
+  {noreply, S};
+
+handle_info({Slot, Node, {prepare, N}}, S) ->
+  {noreply, S};
+
+handle_info({Slot, Node, {promise, N, {PN,PV}}}, S) ->
+  {noreply, S};
+
+handle_info({Slot, Node, {propose, N, V}}, S) ->
+  {noreply, S}
+
+handle_info({Slot, Node, {accepted, N}}, S) ->
+  {noreply, S};
+
+handle_info({'EXIT', Pid, normal}, #s{catchup_pid=Pid} = S) ->
+  {noreply, S#s{catchup_pid=undefined}};
+
+handle_info({'EXIT', Pid, Rsn}, #s{catchup_pid=Pid} = S) ->
   {stop, Rsn, S};
+
 handle_info(Msg, S) ->
   ?warning("~p", [Msg]),
   {noreply, S}.

@@ -22,15 +22,12 @@ init(_Args) ->
   Kids = [ {dlog_store,
             {dlog_store, start_link, []},
             permanent, 5000, worker, [dlog_store]}
-         , {dlog_sync,
-            {dlog_sync, start_link, []},
-            permanent, 5000, worker, [dlog_sync]}
-         , {dlog_catchup,
-            {dlog_catchup, start_link, []},
-            permanent, 5000, worker, [dlog_catchup]}
-         , {paxos_acceptor,
-            {paxos_acceptor, start_link, []},
-            permanent, 5000, worker, [paxos_acceptor]}
+         , {dlog_transport,
+            {dlog_transport, start_link, []},
+            permanent, 5000, worker, [dlog_transport]}
+         , {dlog_server,
+            {dlog_server, start_link, []},
+            permanent, 5000, worker, [dlog_server]}
          ],
   {ok, {RestartStrategy, Kids}}.
 
