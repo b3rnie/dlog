@@ -105,11 +105,6 @@ do_propose(Node, N, V, #s{nodes=Nodes} = S) ->
 
 %%%_ * -----------------------------------------------------------------
 
-next_sno(N, Tot, ID)
-  when (N rem Tot) =:= ID -> N;
-next_sno(N, Tot, ID) ->
-  next_sno(N+1, Tot, ID).
-
 highest_n([{N,V}|Promises], {null,null}) ->
   highest_n(Promises, {N,V});
 highest_n([{N,V}|Promises], {PrevN,PrevV}) ->

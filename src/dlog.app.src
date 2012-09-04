@@ -13,10 +13,9 @@
                              'paxos5@isaba']}
                   , {cbmod, dummy_callback} %% called for each submitted
                   , {logdir, "logs/"}
-                  , {slots_per_file, 10000}
-                  , {prune_after, 604800} %% seconds keep at least 1 week
-                  , {master_lease,     15000}
-                  , {master_heartbeat, 1000}
+                  , {slots_per_file, 10000} %% (due to dets limit)
+                  , {prune_after, 604800}   %% seconds keep at least 1 week
+                  , {timeout, 5000}         %% round timeout
                   ]}
  , {applications, [kernel,stdlib]}
  ]

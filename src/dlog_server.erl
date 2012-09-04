@@ -25,14 +25,20 @@
 %%%_* Macros ===========================================================
 %%%_* Code =============================================================
 %%%_ * Types -----------------------------------------------------------
--record(s, { catchup_pid      :: undefined | pid()
-           , promises    = [] :: list()
-           , accepts     = [] :: list()
-           , requests    = [] :: list()
+-record(s, { catchup_pid      = undefined
+           , requests         = queue:new()
+           %% paxos
+           , is_leader        = false
+           , current_slot     = undefined
+           , current_n        = undefined
+           , current_promises = undefined
+           , current_accepts  = undefined
+           , current_from     = undefined
            %% config
-           , round_timeout    :: integer()
-           , quorum           :: integer()
-           , nodes            :: list()
+           , timeout          = undefined
+           , quorum           = undefined
+           , nodes            = undefined
+           , id               = undefined
            }).
 
 %%%_ * API -------------------------------------------------------------
@@ -42,44 +48,66 @@ start_link() ->
 submit(V, Timeout) ->
   gen_server:call(?MODULE, {submit, V, Timeout}, infinity).
 
-role() ->
-  gen_server:call(?MODULE, role).
-
 %%%_ * gen_server callbacks --------------------------------------------
 init([]) ->
   erlang:process_flag(trap_exit, true),
-  {ok, Nodes}        = application:get_env(dlog, nodes),
-  {ok, Id}           = application:get_env(dlog, id),
-  {ok, RoundTimeout} = application:get_env(dlog, round_timeout),
-  Quorum             = dlog_util:quorum(erlang:length(Nodes)),
-  {ok, Pid}          = dlog_catchup:start_link(),
-  {ok, #s{catchup_pid=Pid, quorum=Quorum, nodes=Nodes,
-          round_timeout=RoundTimeout}}.
+  {ok, Nodes}   = application:get_env(dlog, nodes),
+  {ok, Id}      = application:get_env(dlog, id),
+  {ok, Timeout} = application:get_env(dlog, timeout),
+  Quorum        = dlog_util:quorum(erlang:length(Nodes)),
+  {ok, Pid}     = dlog_catchup:start_link(),
+  {ok, #s{ nodes       = Nodes
+         , id          = Id
+         , timeout     = Timeout
+         , quorum      = Quorum
+         , catchup_pid = Pid
+         }}.
 
 terminate(_Rsn, S) ->
   ok.
 
-handle_call({submit, V, _Timeout}, From, #s{fsms=Fsms0} = S) ->
+handle_call({submit, V, Timeout}, From,
+            #s{ current_slot     = undefined
+              , current_n        = undefined
+              , current_promises = undefined
+              , current_accepts  = undefined
+              , nodes            = Nodes
+              , catchup_pid      = undefined
+              } = S) ->
+  ?hence(queue:is_empty(S#s.requests)),
   Slot = dlog_store:next_free_slot(),
+  N    = next_sno(0, erlang:length(Nodes), S#s.id),
   case S#s.is_leader of
-    true  -> dlog_transport:broadcast({Slot, node(), {propose, N, V}}, Nodes);
-    false -> dlog_transport:broadcast({Slot, node(), {prepare, N}}, Nodes)
+    true  ->
+      %% skip prepare-promise if this node was leader of last instance
+      %% (multi-paxos).
+      Msg = {Slot, node(), {propose, N, V}},
+      dlog_transport:broadcast(Msg, Nodes),
+     false ->
+      Msg = {Slot, node(), {prepare, N}},
+      dlog_transport:broadcast(Msg, Nodes),
   end,
-  {noreply, S};
+  {noreply, S#s{current_slot     = Slot,
+                current_n        = N,
+                current_promises = [],
+                current_accepts  = [],
+                current_from     = From
+               }};
+handle_call({submit, V, Timeout}, From, #s{catchup_pid=undefined} = S) ->
+  %% enqueue and do later
+  {noreply, S#s{requests=queue:in({V, Timeout, From}, S#s.requests)}};
+handle_call({submit, _V, _Timeout}, _From, S) ->
+  %% node is participating as a voting member but will not submit
+  %% any new entries to log until catchup is done.
+  {reply, {error, catching_up}, S}.
 
 handle_cast(_Msg, S) ->
   {stop, bad_cast, S}.
 
-%% lease has timed out, try become master
-handle_info(lease_timeout, S) ->
-  Slot = dlog_store:next_free_slot(),
-  dlog_transport:broadcast({Slot, node(), {prepare, N}}, S#s.nodes),
-  {noreply, S};
-
 handle_info({Slot, Node, {prepare, N}}, S) ->
   case dlog_store:get_slot_v(Slot) of
     {ok, _V} ->
-      dlog_transport:send({Slot, node(), {reject, decided}}, Node),
+      dlog_transport:send({Slot, node(), {reject, slot_decided}}, Node),
       {noreply, S};
     {error, no_such_key} ->
       %% 1. Promise to never accept a proposal numbered less than N
@@ -87,38 +115,60 @@ handle_info({Slot, Node, {prepare, N}}, S) ->
       case dlog_store:get_n(Slot) of
         {ok, Sn}
           when N > Sn ->
-          {PrevN, PrevV} =
+          {Pn, Pv} =
             case dlog_store:get_accepted(Slot) of
-              {ok, {Hn, Hv}}       -> {Hn, Hv};
-              {error, no_such_key} -> {null, null}
+              {ok, {Pn, Pv}}       -> {Pn,Pv};
+              {error, no_such_key} -> {null,null}
             end,
           ok = dlog_store:set_n(Slot, N), %% diskwrite + flush
-          dlog_transport:send({Slot, node(), {promise, PrevN, PrevV}}, Node),
+          Msg = {Slot, node(), {promise, Pn, Pv}},
+          dlog_transport:send(Msg, Node),
           {noreply, S};
         {ok, Sn} ->
-          dlog_transport:send({Slot, node(), {reject, {seen, Sn}}}, Node),
+          Msg = {Slot, node(), {reject, seen, Sn}},
+          dlog_transport:send(Msg, Node),
           {noreply, S};
         {error, no_such_key} ->
           ok = dlog_store:set_n(Slot, N), %% diskwrite + flush
-          dlog_transport:send({Slot, node(), {promise, null, null}}, Node),
+          Msg = {Slot, node(), {promise, null, null}},
+          dlog_transport:send(Msg, Node),
           {noreply, S}
       end
   end;
 
-handle_info({Slot, Node, {promise, N, {PrevN,PrevV}}}, S) ->
-  Promises = [{PrevN,PrevV} | S#s.promises],
+handle_info({Slot, Node, {promise, N, {Pn,Pv}}},
+            #s{current_slot=CurrentSlot} = S)
+  when Slot =/= CurrentSlot ->
+  %% promise but not working on it, ignore.
+  {noreply, S};
+handle_info({Slot, Node, {promise, N, {Pn,Pv}}},
+            #s{current_n = CurrentN} = S)
+  when N =/= CurrentN ->
+  %% promise for a different N
+  {noreply, S};
+handle_info({Slot, Node, {promise, N, {Pn,Pv}}},
+            #s{ current_slot = Slot
+              , current_n    = N
+              } = S) ->
+  Promises = [{Pn,Pv} | S#s.current_promises],
   case erlang:length(Promises) >= S#s.quorum of
     true ->
-      {HN, HV} = highest_n(Promises, {null,null}),
-      if HV =:= null ->
-          dlog_store:set_propose(Slot, {S#s.n, S#s.v}), %% diskwrite + flush
-          dlog_transport:broadcast({Slot, node(), {propose, N, S#s.v}}, Nodes);
-         true ->
-          dlog_store:set_propose(Slot, {HN, HV}), %% diskwrite + flush
-          dlog_transport:broadcast({Slot, node(), {propose, HN, HV}}, Nodes)
+      case promise_max(Promises) of
+        {null,null} ->
+          %% free to pick what to propose
+          %% diskwrite + flush
+          dlog_store:set_propose(Slot, {N, S#s.current_v}),
+          Msg = {Slot, node(), {propose, N, S#s.current_v}},
+          dlog_transport:broadcast(Msg, S#s.nodes);
+        {NMax,VMax} ->
+          %% bound by earlier promises done
+          %% diskwrite + flush
+          dlog_store:set_propose(Slot, {NMax,VMax}),
+          Msg = {Slot, node(), {propose, NMax, VMax}},
+          dlog_transport:broadcast(Msg, S#s.nodes)
       end;
     false ->
-      {noreply, S#s{promises=Promises}}
+      {noreply, S#s{current_promises=Promises}}
   end;
 
 handle_info({Slot, Node, {propose, N, V}}, S) ->
@@ -129,19 +179,40 @@ handle_info({Slot, Node, {propose, N, V}}, S) ->
       case dlog_store:get_n(Slot) of
         HN when HN =< N ->
           dlog_store:set_accepted(Slot, N, V),
-          dlog_transport:broadcast({Slot, node(), {accepted, Slot, N, V}},
-                                   Nodes),
-      {noreply, S};
-    _ ->
+          Msg = {Slot, node(), {accepted, N}},
+          dlog_transport:broadcast(Msg, Nodes),
+          {noreply, S};
+        _ ->
       {noreply, S}
   end.
 
+handle_info({Slot, Node, {accepted, N}},
+            #s{current_n = CurrentN} = S)
+  when N =/= CurrentN ->
+  {noreply, S};
 handle_info({Slot, Node, {accepted, N}}, S) ->
-  Accepts = [{Node, N} | S#s.accepts],
+  Accepts = lists:usort([Node | S#s.current_accepts]),
   case erlang:length(Accepts) >= S#s.quorum of
     true  ->
+      {ok, V} = dlog_store:get_accepted(Slot, N),
       dlog_store:set_slot_v(Slot, V),
-      
+      %% done move on to next slot
+      case queue:out(S#s.requests) of
+        {{value, Item}, Requests} ->
+          %% todo send request
+          {noreply, S};
+        {empty, S#s.requests} ->
+          {noreply, S#s{current_slot=undefined,
+                        current_n=N,
+                        current_promises=[],
+                        current_accepts=[],
+                        current_from=From}}
+      end;
+    false ->
+      {noreply, S#s{current_accepts=Accepts}}
+  end;
+
+handle_info({Slot, Node, {reject, slot_decided}}, S) ->
   {noreply, S};
 
 handle_info({'EXIT', Pid, normal}, #s{catchup_pid=Pid} = S) ->
@@ -158,6 +229,17 @@ code_change(_OldVsn, S, _Extra) ->
   {ok, S}.
 
 %%%_ * Internals -------------------------------------------------------
+next_sno(N, Tot, ID)
+  when (N rem Tot) =:= ID -> N;
+next_sno(N, Tot, ID) ->
+  next_sno(N+1, Tot, ID).
+
+promise_max(Promises) ->
+  lists:foldl(fun({N,V}, {null,null})       -> {N,V};
+                 ({N,V}, {Pn,Pv}) when N>Pn -> {N,V};
+                 ({N,V}, {Pn,Pv})           -> {Pn,Pv}
+              end, {null, null}, Promises).
+
 insert_fsm(Pid, Slot, Fsms0) ->
   Fsms1 = dict:insert({pid, Pid}, Slot, Fsms0),
   _Fsms = dict:insert({slot, Slot}, Pid, Fsms1).
@@ -168,6 +250,20 @@ delete_fsm(Pid, Slot, Fsms0) ->
 
 get_next_n(N, All)-> ((N div All)+1) * All.
 
+%%%_* Tests ============================================================
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+next_sno_test() ->
+  3 = next_sno(0, 5, 3),
+  8 = next_sno(4, 5, 3),
+  ok.
+
+promise_max_test() ->
+  {3, baz} = promise_max([{1,foo}, {3,baz}, {2,bar}], {null, null}),
+  ok.
+
+-endif.
 
 %%%_* Emacs ============================================================
 %%% Local Variables:
